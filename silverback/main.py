@@ -7,8 +7,7 @@ from types import MethodType
 from typing import Any, Awaitable, Callable
 
 import pycron  # type: ignore[import-untyped]
-from ape.api.networks import LOCAL_NETWORK_NAME
-from ape.contracts import ContractEvent, ContractEventWrapper, ContractInstance
+from ape.contracts import ContractEvent, ContractEventWrapper
 from ape.logging import logger
 from ape.managers.chain import BlockContainer
 from ape.types import AddressType, ContractLog
@@ -47,6 +46,9 @@ class TaskData(BaseModel):
     labels: dict[str, str]
 
     # NOTE: Any other items here must have a default value
+
+    def __hash__(self) -> int:
+        return hash(self.model_dump_json())
 
 
 class SharedState(defaultdict):
@@ -109,13 +111,15 @@ class SilverbackBot(ManagerAccessMixin):
         ...  # Connection has been initialized, can call broker methods e.g. `bot.on_(...)`
     """
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, signer_required: bool = False):
         """
         Create bot
 
         Args:
             settings (~:class:`silverback.settings.Settings` | None): Settings override.
                 Defaults to environment settings.
+            signer_required (bool): If True, raise at startup when no signer is configured.
+                Defaults to False.
         """
         if not settings:
             settings = Settings()
@@ -124,18 +128,13 @@ class SilverbackBot(ManagerAccessMixin):
         # NOTE: This allows using connected ape methods e.g. `Contract`
         self.provider = provider_context.__enter__()
 
+        self.cluster = settings.get_cluster_client()
+
         self.identifier = SilverbackID(
             name=settings.BOT_NAME,
             network=self.provider.network.name,
             ecosystem=self.provider.network.ecosystem.name,
         )
-
-        # Adjust defaults from connection
-        if settings.NEW_BLOCK_TIMEOUT is None and (
-            self.provider.network.name.endswith("-fork")
-            or self.provider.network.name == LOCAL_NETWORK_NAME
-        ):
-            settings.NEW_BLOCK_TIMEOUT = int(timedelta(days=1).total_seconds())
 
         settings_str = "\n  ".join(
             f'{key}="{val}"' for key, val in settings.model_dump().items() if val
@@ -149,11 +148,13 @@ class SilverbackBot(ManagerAccessMixin):
             # NOTE: Dont track system tasks
             if not str(task_type).startswith("system:")
         }
-        self.poll_settings: dict[str, dict] = {}
 
         atexit.register(provider_context.__exit__, None, None, None)
 
         self.signer = settings.get_signer()
+        if signer_required and not self.signer:
+            raise NoSignerLoaded()
+
         if self.signer:
             # NOTE: Monkeypatch `AccountAPI.call` to update bot nonce tracking state
             original_call = self.signer.call
@@ -164,20 +165,14 @@ class SilverbackBot(ManagerAccessMixin):
 
             self.signer.__dict__["call"] = MethodType(call_override, self.signer)
 
-        self.new_block_timeout = settings.NEW_BLOCK_TIMEOUT
         self.use_fork = settings.FORK_MODE and not self.provider.network.name.endswith("-fork")
-
-        signer_str = f"\n  SIGNER={repr(self.signer)}"
-        new_block_timeout_str = (
-            f"\n  NEW_BLOCK_TIMEOUT={self.new_block_timeout}" if self.new_block_timeout else ""
-        )
 
         network_choice = f"{self.identifier.ecosystem}:{self.identifier.network}"
         logger.success(
             "Loaded Silverback Bot:\n"
             f'  NETWORK="{network_choice}"\n'
-            f"  FORK_MODE={self.use_fork}"
-            f"{signer_str}{new_block_timeout_str}"
+            f"  FORK_MODE={self.use_fork}\n"
+            f"  SIGNER={repr(self.signer)}"
         )
 
         # NOTE: Runner must call this to configure itself for all SDK hooks
@@ -237,7 +232,7 @@ class SilverbackBot(ManagerAccessMixin):
         return self.tasks.get(task_type, [])
 
     def __get_user_all_taskdata_handler(self) -> list[TaskData]:
-        return [v for k, l in self.tasks.items() if str(k).startswith("user:") for v in l]
+        return [v for k, ls in self.tasks.items() if str(k).startswith("user:") for v in ls]
 
     async def __load_snapshot_handler(self, startup_state: StateSnapshot):
         # NOTE: *DO NOT USE* in Runner, as it will not be updated by the bot
@@ -428,16 +423,25 @@ class SilverbackBot(ManagerAccessMixin):
             raise ContainerTypeMismatchError(task_type, container)
 
         elif isinstance(container, ContractEventWrapper):
-            if len(container.events) != 1:
-                raise InvalidContainerConfigurationError(
-                    f"Requires exactly 1 event to unwrap: {container.events}"
-                )
+            if len(container.events) != 1 and filter_args:
+                for event in container.events:
+                    if all(f"indexed {argname}" in event.abi.signature for argname in filter_args):
+                        container = event
+                        break
 
-            container = container.events[0]
+                else:
+                    raise InvalidContainerConfigurationError(
+                        f"Requires exactly 1 event to unwrap: {container.events}"
+                    )
+
+            else:  # Just pick the last event, all are duplicates anyways
+                # NOTE: More likely to pick generic `ContractContainer.at` instances
+                #       (e.g. `Token.at` from `ape_tokens`)
+                container = container.events[-1]
 
         # Register user function as task handler with our broker
         def add_taskiq_task(
-            handler: Callable[..., Any | Awaitable[Any]]
+            handler: Callable[..., Any | Awaitable[Any]],
         ) -> AsyncTaskiqDecoratedTask:
             labels: dict[str, str] = dict()
 
@@ -522,11 +526,16 @@ class SilverbackBot(ManagerAccessMixin):
         Code that will be exected by one worker after worker startup, but before the
         bot is put into the "run" state by the Runner.
 
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
+
         Usage example::
 
             @bot.on_startup()
-            def do_something_on_startup(startup_state: StateSnapshot):
-                ...  # Reprocess missed events or blocks
+            def do_something_on_startup(
+                startup_state: StateSnapshot,
+            ): ...  # Reprocess missed events or blocks
         """
         return self.broker_task_decorator(TaskType.STARTUP)
 
@@ -535,11 +544,14 @@ class SilverbackBot(ManagerAccessMixin):
         Code that will be exected by one worker before worker shutdown, after the
         Runner has decided to put the bot into the "shutdown" state.
 
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
+
         Usage example::
 
             @bot.on_shutdown()
-            def do_something_on_shutdown():
-                ...  # Record final state of bot
+            def do_something_on_shutdown(): ...  # Record final state of bot
         """
         return self.broker_task_decorator(TaskType.SHUTDOWN)
 
@@ -552,6 +564,10 @@ class SilverbackBot(ManagerAccessMixin):
         This is a great place to load heavy dependencies for the workers,
         such as database connections, ML models, etc.
         ```
+
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
 
         Usage example::
 
@@ -571,6 +587,10 @@ class SilverbackBot(ManagerAccessMixin):
         worker startup.
         ```
 
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
+
         Usage example::
 
             @bot.on_worker_shutdown()
@@ -582,56 +602,32 @@ class SilverbackBot(ManagerAccessMixin):
     def on_(
         self,
         container: BlockContainer | ContractEvent,
-        # TODO: possibly remove these
-        new_block_timeout: int | None = None,
-        start_block: int | None = None,
         filter_args: dict[str, Any] | None = None,
         **filter_kwargs: dict[str, Any],
-    ):
+    ) -> Callable[[Callable], AsyncTaskiqDecoratedTask]:
         """
         Create task to handle events created by the `container` trigger.
 
         Args:
             container: (BlockContainer | ContractEvent): The event source to watch.
-            new_block_timeout: (int | None): Override for block timeout that is acceptable.
-                Defaults to whatever the bot's settings are for default polling timeout are.
-            start_block (int | None): block number to start processing events from.
-                Defaults to whatever the latest block is.
+            filter_args: (dict[str, Any] | None):
+                Arguments to use for event log filter. Gets combined with ``filter_kwargs``.
+                Is useful for when an event argument name is a Python keyword.
+            **filter_kwargs: dict[str, Any]:
+                Arguments to use for event log filter. Gets combined with ``filter_args``.
+
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
 
         Raises:
             :class:`~silverback.exceptions.InvalidContainerTypeError`:
                 If the type of `container` is not configurable for the bot.
         """
         if isinstance(container, BlockContainer):
-            if new_block_timeout is not None:
-                if "_blocks_" in self.poll_settings:
-                    self.poll_settings["_blocks_"]["new_block_timeout"] = new_block_timeout
-                else:
-                    self.poll_settings["_blocks_"] = {"new_block_timeout": new_block_timeout}
-
-            if start_block is not None:
-                if "_blocks_" in self.poll_settings:
-                    self.poll_settings["_blocks_"]["start_block"] = start_block
-                else:
-                    self.poll_settings["_blocks_"] = {"start_block": start_block}
-
             return self.broker_task_decorator(TaskType.NEW_BLOCK, container=container)
 
-        elif isinstance(container, ContractEvent):
-            if isinstance(container.contract, ContractInstance):
-                key = container.contract.address
-                if new_block_timeout is not None:
-                    if key in self.poll_settings:
-                        self.poll_settings[key]["new_block_timeout"] = new_block_timeout
-                    else:
-                        self.poll_settings[key] = {"new_block_timeout": new_block_timeout}
-
-                if start_block is not None:
-                    if key in self.poll_settings:
-                        self.poll_settings[key]["start_block"] = start_block
-                    else:
-                        self.poll_settings[key] = {"start_block": start_block}
-
+        elif isinstance(container, (ContractEvent, ContractEventWrapper)):
             if filter_args:
                 filter_kwargs.update(filter_args)
 
@@ -645,12 +641,16 @@ class SilverbackBot(ManagerAccessMixin):
         # TODO: Support mempool polling?
         raise InvalidContainerTypeError(container)
 
-    def cron(self, cron_schedule: str) -> Callable:
+    def cron(self, cron_schedule: str) -> Callable[[Callable], AsyncTaskiqDecoratedTask]:
         """
         Create task to run on a schedule.
 
         Args:
             cron_schedule (str): A cron-like schedule string.
+
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
         """
         return self.broker_task_decorator(TaskType.CRON_JOB, cron_schedule=cron_schedule)
 
@@ -664,7 +664,7 @@ class SilverbackBot(ManagerAccessMixin):
         eq: ScalarType | None = None,
         ne: ScalarType | None = None,
         # TODO: Support `rate_[ge|gt|le|...]` too?
-    ) -> Callable:
+    ) -> Callable[[Callable], AsyncTaskiqDecoratedTask]:
         """
         Create a task that runs when the value of a specified metric has tripped a threshold.
 
@@ -684,6 +684,10 @@ class SilverbackBot(ManagerAccessMixin):
             lt (ScalarType | None): trigger when metric value is less than value.
             eq (ScalarType | None): trigger when metric value is equal to value.
             ne (ScalarType | None): trigger when metric value is not equal to value.
+
+        Returns:
+            Callable[[Callable], :class:`~taskiq.AsyncTaskiqDecoratedTask`]:
+                A function wrapper that will register the task handler.
         """
         value_threshold: dict[str, ScalarType] = {}
         if ge is not None:

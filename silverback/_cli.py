@@ -22,12 +22,15 @@ from ape.logging import LogLevel
 from ape.types import AddressType
 from apepay import Stream, StreamManager
 
+from silverback.recorder import JSONLineRecorder
+
 from ._click_ext import (
     SectionedHelpGroup,
     auth_required,
     bot_path_callback,
     cls_import_callback,
     cluster_client,
+    env_file_callback,
     parse_globbed_arg,
     platform_client,
     timedelta_callback,
@@ -100,6 +103,12 @@ def _network_callback(ctx, param, val):
     callback=cls_import_callback,
 )
 @click.option(
+    "--record",
+    is_flag=True,
+    default=False,
+    help="Record this session into a session file (under `.silverback-sessions/`)",
+)
+@click.option(
     "--recorder",
     "recorder_class",
     metavar="CLASS_REF",
@@ -108,8 +117,17 @@ def _network_callback(ctx, param, val):
 )
 @click.option("-x", "--max-exceptions", type=int, default=3)
 @click.option("--debug", is_flag=True, default=False)
+@click.option(
+    "--env-file",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True, path_type=Path),
+    callback=env_file_callback,
+    is_eager=True,
+    expose_value=False,
+    help=("Path to .env file(s) (multiple allowed; values override). "),
+)
 @click.argument("bot", required=False, callback=bot_path_callback)
-def run(cli_ctx, account, runner_class, recorder_class, max_exceptions, debug, bot):
+def run(cli_ctx, account, runner_class, record, recorder_class, max_exceptions, debug, bot):
     """Run Silverback bot"""
     from silverback.runner import PollingRunner, WebsocketRunner
 
@@ -125,15 +143,24 @@ def run(cli_ctx, account, runner_class, recorder_class, max_exceptions, debug, b
                 message="Network choice cannot support running bot",
             )
 
+    if record and not recorder_class:
+        recorder_class = JSONLineRecorder
+
     runner = runner_class(
         bot,
-        recorder=recorder_class() if recorder_class else None,
+        recorder=recorder_class() if record else None,
         max_exceptions=max_exceptions,
     )
     asyncio.run(runner.run(), debug=debug)
 
 
 @cli.command(section="Local Commands")
+@click.option(
+    "--use-docker",
+    is_flag=True,
+    default=False,
+    help="Override podman detection and use docker to build instead.",
+)
 @click.option(
     "-g",
     "--generate",
@@ -164,7 +191,7 @@ def run(cli_ctx, account, runner_class, recorder_class, max_exceptions, debug, b
     help="Push image to logged-in registry. Defaults to false.",
 )
 @click.argument("path", required=False, default=None)
-def build(generate, tag_base, version, push, path):
+def build(use_docker, generate, tag_base, version, push, path):
     """
     Generate Dockerfiles and build bot container images
 
@@ -178,8 +205,8 @@ def build(generate, tag_base, version, push, path):
     """
     from silverback._build_utils import (
         IMAGES_FOLDER_NAME,
-        build_docker_images,
-        generate_dockerfiles,
+        build_container_images,
+        generate_containerfiles,
     )
 
     if generate:
@@ -199,15 +226,15 @@ def build(generate, tag_base, version, push, path):
                 ", or process all '*.py' bots in  'bots/' folder."
             )
 
-        generate_dockerfiles(path)
+        generate_containerfiles(path)
 
     if not (Path.cwd() / IMAGES_FOLDER_NAME).exists():
         raise click.ClickException(
-            f"The dockerfile cache folder '{IMAGES_FOLDER_NAME}' does not exist. "
+            f"The container image cache folder '{IMAGES_FOLDER_NAME}' does not exist. "
             "You can run `silverback build --generate` to generate it and build."
         )
 
-    build_docker_images(tag_base=tag_base, version=version, push=push)
+    build_container_images(use_docker=use_docker, tag_base=tag_base, version=version, push=push)
 
 
 @cli.command(cls=ConnectedProviderCommand, section="Local Commands")
@@ -218,11 +245,19 @@ def build(generate, tag_base, version, push, path):
 )
 @click.option("--account", type=AccountAliasPromptChoice(), callback=_account_callback)
 @click.option("-w", "--workers", type=int, default=2)
-@click.option("-x", "--max-exceptions", type=int, default=3)
 @click.option("-s", "--shutdown_timeout", type=int, default=90)
 @click.option("--debug", is_flag=True, default=False)
+@click.option(
+    "--env-file",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True, path_type=Path),
+    callback=env_file_callback,
+    is_eager=True,
+    expose_value=False,
+    help=("Path to .env file(s) (multiple allowed; values override). "),
+)
 @click.argument("bot", required=False, callback=bot_path_callback)
-def worker(cli_ctx, account, workers, max_exceptions, shutdown_timeout, debug, bot):
+def worker(cli_ctx, account, workers, shutdown_timeout, debug, bot):
     """Run Silverback task workers (advanced)"""
     from silverback.worker import run_worker
 
@@ -863,7 +898,7 @@ def fund_payment_stream(
 
     click.echo(
         f"Funding Stream for Cluster '{cluster_path}' with "
-        f"{token_amount / 10**stream.token.decimals():0.4f} {stream.token.symbol()}"
+        f"{token_amount / 10 ** stream.token.decimals():0.4f} {stream.token.symbol()}"
     )
     stream.add_funds(token_amount, sender=account)
 
@@ -1022,7 +1057,6 @@ def vars():
 
 def parse_envvars(ctx, name, value: list[str]) -> dict[str, str]:
     def parse_envar(item: str):
-
         if "=" not in item:
             if not (envvar := os.environ.get(item)):
                 raise click.UsageError(
@@ -1133,9 +1167,7 @@ def update_vargroup(
             vg.update(
                 **updated_vars,
                 **{v: None for v in deleted_vars},
-            ).model_dump(
-                exclude={"id"}
-            )  # NOTE: Skip machine `.id`
+            ).model_dump(exclude={"id"})  # NOTE: Skip machine `.id`
         )
     )
 
@@ -1171,6 +1203,12 @@ def bots():
     "credential_name",
     help="registry credentials to use to pull the image",
 )
+@click.option(
+    "--cluster-access/--no-cluster-access",
+    is_flag=True,
+    default=False,
+    help="Give bot access to CLUSTER (Advanced)",
+)
 @click.argument("name")
 @cluster_client()
 def new_bot(
@@ -1182,6 +1220,7 @@ def new_bot(
     account: str | None,
     environment: list[str],
     credential_name: str | None,
+    cluster_access: bool,
     name: str,
 ):
     """Create a new bot in a CLUSTER with the given configuration"""
@@ -1215,6 +1254,14 @@ def new_bot(
     if credential_name is not None:
         click.echo(f"Registry credentials: {credential_name}")
 
+    if cluster_access and not click.confirm(
+        click.style(
+            f"Are you sure you want to give this bot admin access to cluster '{cluster.base_url}'?",
+            fg="red",
+        )
+    ):
+        return
+
     if not click.confirm("Do you want to create and start running this bot?"):
         return
 
@@ -1227,6 +1274,7 @@ def new_bot(
         account=account,
         environment=environment,
         credential_name=credential_name,
+        cluster_access=cluster_access,
     )
     click.secho(f"Bot '{bot.name}' ({bot.id}) deploying...", fg="green", bold=True)
 
@@ -1295,6 +1343,12 @@ def bot_info(cluster: "ClusterClient", name: str):
     default="<no-change>",
     help="registry credentials to use to pull the image",
 )
+@click.option(
+    "--cluster-access/--no-cluster-access",
+    is_flag=True,
+    default=None,
+    help="Give bot access to CLUSTER. Defaults to no change (Advanced)",
+)
 @click.argument("name", metavar="BOT")
 @cluster_client()
 def update_bot(
@@ -1306,6 +1360,7 @@ def update_bot(
     environment: list[str],
     clear_environment: bool,
     credential_name: str | None,
+    cluster_access: bool | None,
     name: str,
 ):
     """Update configuration of BOT in CLUSTER
@@ -1377,6 +1432,15 @@ def update_bot(
 
     redeploy_required |= clear_environment
 
+    if cluster_access and not click.confirm(
+        click.style(
+            f"Are you sure you want to give this bot admin access to cluster '{cluster.base_url}'?",
+            fg="red",
+        )
+    ):
+        return
+    redeploy_required |= cluster_access is not None
+
     if not click.confirm(
         f"Do you want to update '{name}'?"
         if not redeploy_required
@@ -1393,6 +1457,7 @@ def update_bot(
         account=account,
         environment=environment if environment or clear_environment else None,
         credential_name=credential_name,
+        cluster_access=cluster_access,
     )
 
     # NOTE: Skip machine `.id`

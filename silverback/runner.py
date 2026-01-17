@@ -65,7 +65,7 @@ class BaseRunner(ABC):
         )
 
         self.max_exceptions = max_exceptions
-        self.exceptions = 0
+        self.exceptions: dict[TaskData, int] = defaultdict(lambda: 0)
 
         logger.info(f"Using {self.__class__.__name__}: max_exceptions={self.max_exceptions}")
 
@@ -120,15 +120,15 @@ class BaseRunner(ABC):
 
         if not task_error:
             # NOTE: Reset exception counter
-            self.exceptions = 0
+            self.exceptions[task_data] = 0
             return
 
-        self.exceptions += 1
+        self.exceptions[task_data] += 1
 
         if isinstance(task_error, Halt):
             raise task_error
 
-        elif self.exceptions > self.max_exceptions:
+        elif sum(self.exceptions.values()) > self.max_exceptions:
             raise Halt() from task_error
 
     async def _checkpoint(self):
@@ -172,7 +172,7 @@ class BaseRunner(ABC):
         value_thresholds = {
             op: Decimal(val)  # NOTE: Decimal is most flexible at handling strings
             for lbl, val in task_data.labels.items()
-            if lbl.startswith("value:") and (op := getattr(operator, lbl.lstrip("value:"), None))
+            if lbl.startswith("value:") and (op := getattr(operator, lbl[6:]))
         }
 
         def exceeds_value_threshold(data: ScalarType) -> bool:
@@ -376,7 +376,7 @@ class BaseRunner(ABC):
         user_tasks = await self.startup()
 
         def exit_handler(signum, _frame):
-            logger.info(f"{signal.Signals(signum).name} signal received")
+            logger.warning(f"{signal.Signals(signum).name} signal received")
             self.shutdown_event.set()
 
         # Make sure we handle various ways that OS might kill process
@@ -408,8 +408,9 @@ class BaseRunner(ABC):
             # NOTE: If any exception raised by non-background tasks, will quit all
 
         except ExceptionGroup as eg:
-            if error_str := "\n".join(str(e) for e in eg.exceptions if not isinstance(e, Halt)):
-                logger.error(error_str)
+            for err in eg.exceptions:
+                if not isinstance(err, Halt):
+                    logger.log_error(err)
 
         logger.warning("Shutdown started")
         await self.shutdown()
@@ -484,7 +485,6 @@ class PollingRunner(BaseRunner, ManagerAccessMixin):
     Run a single bot against a live network using a basic in-memory queue.
     """
 
-    # TODO: Move block_timeout settings to Ape core config
     # TODO: Merge polling/websocket subscriptions downstream in Ape core
 
     def __init__(self, bot: SilverbackBot, *args, **kwargs):

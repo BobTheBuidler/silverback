@@ -2,6 +2,7 @@ import fnmatch
 from datetime import datetime, timedelta
 from functools import update_wrapper
 from pathlib import Path
+from traceback import TracebackException
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -19,7 +20,8 @@ from .exceptions import ImportFromStringError
 if TYPE_CHECKING:
     from ape.contracts import ContractInstance
 
-    from silverback.cluster.client import PlatformClient
+    from .cluster.client import PlatformClient
+    from .main import SilverbackBot
 
 
 # NOTE: only load once
@@ -94,7 +96,6 @@ def timedelta_callback(
     elif " " in timestamp_or_str:
         units_value = {}
         for time_units in map(lambda s: s.strip(), timestamp_or_str.split(",")):
-
             time, units = time_units.split(" ")
             if not units.endswith("s"):
                 units += "s"
@@ -116,6 +117,42 @@ def timedelta_callback(
         ctx=ctx,
         param=param,
     )
+
+
+def env_file_callback(
+    ctx: click.Context, param: click.Parameter, paths: tuple[Path, ...] | None
+) -> None:
+    if not paths:
+        return
+
+    from itertools import chain
+
+    from dotenv import load_dotenv
+
+    for path in paths:
+        if ".env" not in path.name.lower():
+            parent = path.parent
+
+            candidates = {p.name for p in chain(parent.glob("*.env"), parent.glob(".env.*"))}
+            if (parent / ".env").exists():
+                candidates.add(".env")
+
+            similar = sorted(candidates)
+            if similar:
+                suggestions = ", ".join(similar[:3])
+                raise click.BadParameter(
+                    f"Invalid env file: {path.name}. Did you mean: {suggestions}?",
+                    ctx=ctx,
+                    param=param,
+                )
+
+            raise click.BadParameter(
+                f"Refusing to load non-.env file: {path}. Allowed: any filename containing '.env' ",
+                ctx=ctx,
+                param=param,
+            )
+
+        load_dotenv(path, override=True)
 
 
 class OrderedCommands(click.Group):
@@ -288,7 +325,6 @@ def platform_client(show_login: bool = True):
 
 def cluster_client(show_login: bool = True):
     def add_cluster_client(f):
-
         def inject_cluster(ctx, param, value: str | None):
             ctx.obj = ctx.obj or {}
             if not (profile := ctx.obj.get("profile")):
@@ -361,22 +397,58 @@ def cluster_client(show_login: bool = True):
     return add_cluster_client
 
 
-def bot_path_callback(ctx: click.Context, param: click.Parameter, path: str | None):
-    if not path:
-        path = "bot:bot"
-    elif ":" not in path:
+def bot_path_callback(
+    ctx: click.Context,
+    param: click.Parameter,
+    path: str | None,
+) -> "SilverbackBot":
+    if path is None:
+        path = "bot"
+
+    elif (
+        (bots_dir := Path.cwd() / "bots").exists()
+        and bots_dir.is_dir()
+        and not (bot_path := path.split(":")[0]).startswith("bots.")
+        and bot_path != "bot"
+    ):
+        for file in bots_dir.iterdir():
+            if file.stem == bot_path and (
+                file.suffix == ".py"  # Python file
+                or (file.is_dir() and (file / "__init__.py").exists())  # Python module
+            ):
+                break
+
+        else:
+            raise click.BadParameter(f"Bot module '{bot_path}' not found in `bots/`.")
+
+        path = f"bots.{path}"
+
+    if ":" not in path:
         path += ":bot"
 
-    from silverback._importer import import_from_string
+    from ._importer import import_from_string
 
     try:
-        return import_from_string(path)
+        var = import_from_string(path)
+
     except ImportFromStringError:
-        try:
-            return import_from_string(f"bots.{path}")
-        except (ImportFromStringError, ModuleNotFoundError):
-            # This may happen if accidentally running `silverback run`
-            # with no bots arguments outside of your bots-project directory.
-            raise click.BadParameter(
-                "Nothing to run: No bot argument(s) given and no bots module found."
-            )
+        # This may happen if accidentally running `silverback run`
+        # with no bots arguments outside of your bots-project directory.
+        raise click.BadParameter(f"Bot module '{path}' not found.")
+
+    except Exception as err:
+        tb = TracebackException.from_exception(err)
+        tb_str = "".join(tb.format())
+        raise click.UsageError(
+            f"Fatal exception while loading bot module '{path}'\n\n{tb_str}"
+        ) from err
+
+    # NOTE: Avoid cyclical reference
+    from .main import SilverbackBot
+
+    if not isinstance(var, SilverbackBot):
+        raise click.BadParameter(
+            f"Variable loaded with '{path}' is not a `SilverbackBot` instance."
+        )
+
+    return var
