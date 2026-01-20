@@ -1,24 +1,4 @@
-on:
-  push:
-    paths:
-      - '**/*.py'
-      - 'pyproject.toml'
-      - 'setup.cfg'
-      - 'setup.py'
-      - 'requirements*.txt'
-      - '.pre-commit-config.yaml'
-      - 'tests/**'
-      - '.github/workflows/test.yaml'
-  pull_request:
-    paths:
-      - '**/*.py'
-      - 'pyproject.toml'
-      - 'setup.cfg'
-      - 'setup.py'
-      - 'requirements*.txt'
-      - '.pre-commit-config.yaml'
-      - 'tests/**'
-      - '.github/workflows/test.yaml'
+on: ["push", "pull_request"]
 
 name: Test
 
@@ -99,7 +79,7 @@ jobs:
             pip install .[test]
 
         - name: Run Tests
-          run: pytest -m "not fuzzing" -n 0 -s --cov
+          run: pytest
 
 # NOTE: uncomment this block after you've marked tests with @pytest.mark.fuzzing
 #    fuzzing:
