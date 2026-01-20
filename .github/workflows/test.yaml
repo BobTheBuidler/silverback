@@ -1,24 +1,4 @@
-on:
-  push:
-    paths:
-      - '**/*.py'
-      - 'pyproject.toml'
-      - 'setup.cfg'
-      - 'setup.py'
-      - 'requirements*.txt'
-      - '.pre-commit-config.yaml'
-      - 'tests/**'
-      - '.github/workflows/test.yaml'
-  pull_request:
-    paths:
-      - '**/*.py'
-      - 'pyproject.toml'
-      - 'setup.cfg'
-      - 'setup.py'
-      - 'requirements*.txt'
-      - '.pre-commit-config.yaml'
-      - 'tests/**'
-      - '.github/workflows/test.yaml'
+on: ["push", "pull_request"]
 
 name: Test
 
@@ -75,7 +55,7 @@ jobs:
             pip install .[lint,test,mcp]
 
         - name: Run MyPy
-          run: mypy .
+          run: mypy
 
     functional:
         runs-on: ${{ matrix.os }}
