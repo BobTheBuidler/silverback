@@ -2,7 +2,7 @@
 # See LICENSE in the project root for license information. #
 #----------------------------------------------------------#
 ARG PYTHON_VERSION="3.11"
-ARG BASE_APE_IMAGE="ghcr.io/apeworx/ape:python${PYTHON_VERSION}-stable-slim"
+ARG BASE_APE_IMAGE="ghcr.io/apeworx/ape:python${PYTHON_VERSION}-stable-slim@sha256:f8f195f633705da54a8f7202d7007883fc71785f268caa7143016e6d2e630f03"
 
 # Stage 1: Build dependencies
 # NOTE: Build with builder image to reduce image size
@@ -13,7 +13,7 @@ USER root
 WORKDIR /home/harambe/project
 
 # Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:9a23023be68b2ed09750ae636228e903a54a05ea56ed03a934d00fe9fbeded4b /uv /bin/
 
 # Only copy dependency files first (locked deps change less often)
 # NOTE: In CI, you need to cache `uv.lock` (or create it if it doesn't exist)
@@ -89,7 +89,7 @@ FROM slim AS full
 
 # Install anvil (for the Foundry plugin to be useful)
 # NOTE: Adds 33MB to build
-COPY --from=ghcr.io/foundry-rs/foundry:stable \
+COPY --from=ghcr.io/foundry-rs/foundry:stable@sha256:043752653d5be351c71709091b3db97c4421c907eb40ea294195e7f532aadf46 \
     /usr/local/bin/anvil /home/harambe/.local/bin/anvil
 
 COPY --from=full-builder --chown=harambe:harambe \
