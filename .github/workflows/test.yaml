@@ -75,7 +75,7 @@ jobs:
             pip install .[lint,test,mcp]
 
         - name: Run MyPy
-          run: mypy .
+          run: mypy
 
     functional:
         runs-on: ${{ matrix.os }}

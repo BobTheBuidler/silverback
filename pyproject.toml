@@ -161,6 +161,7 @@ convention = "google"
 [tool.mypy]
 exclude = ["build/", "dist/", "docs/"]
 plugins = ["pydantic.mypy"]
+files = ["."]
 
 [tool.pytest.ini_options]
 addopts = """
