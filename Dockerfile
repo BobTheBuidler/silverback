@@ -2,7 +2,7 @@
 # See LICENSE in the project root for license information. #
 #----------------------------------------------------------#
 ARG PYTHON_VERSION="3.11"
-ARG BASE_APE_IMAGE="ghcr.io/apeworx/ape:python${PYTHON_VERSION}-stable-slim"
+ARG BASE_APE_IMAGE="ghcr.io/apeworx/ape:python${PYTHON_VERSION}-stable-slim@sha256:f8f195f633705da54a8f7202d7007883fc71785f268caa7143016e6d2e630f03"
 
 # Stage 1: Build dependencies
 # NOTE: Build with builder image to reduce image size
