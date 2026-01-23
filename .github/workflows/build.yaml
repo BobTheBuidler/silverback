@@ -4,7 +4,23 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "Dockerfile"
+      - "silverback/**"
+      - "bots/**"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - "requirements*.txt"
+      - ".github/workflows/build.yaml"
   pull_request:
+    paths:
+      - "Dockerfile"
+      - "silverback/**"
+      - "bots/**"
+      - "pyproject.toml"
+      - "setup.cfg"
+      - "requirements*.txt"
+      - ".github/workflows/build.yaml"
   release:
     type: [published]
 

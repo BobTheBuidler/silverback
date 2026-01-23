@@ -6,6 +6,9 @@ on:
       - opened
       - edited
       - synchronize
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 jobs:
     pr-title:
