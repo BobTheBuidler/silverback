@@ -3,10 +3,22 @@ name: Docs
 on:
   push:
     branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - ".github/workflows/docs.yaml"
   release:
     types: [released]
   pull_request:
     types: [opened, synchronize]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - ".github/workflows/docs.yaml"
 
 jobs:
   docs:
